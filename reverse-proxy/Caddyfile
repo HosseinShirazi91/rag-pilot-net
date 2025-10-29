@@ -1,0 +1,37 @@
+{
+    # Use internal CA for local HTTPS, avoids external calls
+    local_certs
+    servers :443 {
+        protocols h1 h2
+    }
+    admin off
+}
+
+# Frontend under https://app.localhost
+app.localhost {
+    encode zstd gzip
+    tls internal
+    @static path_regexp static ^/static/.*$
+    reverse_proxy frontend:8501
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        Permissions-Policy interest-cohort=()
+    }
+}
+
+# Backend under https://backend.localhost
+backend.localhost {
+    encode zstd gzip
+    tls internal
+    reverse_proxy backend:8000
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        Permissions-Policy interest-cohort=()
+    }
+}

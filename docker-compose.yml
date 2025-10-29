@@ -1,0 +1,168 @@
+version: "3.9"
+
+networks:
+  rag-pilot-net:
+    name: rag-pilot-net
+
+volumes:
+  pgdata:
+  qdrant_storage:
+  ollama_models:
+  caddy_data:
+  caddy_config:
+  hf_cache:
+  ingest_state:
+
+services:
+  reverse-proxy:
+    build: ./reverse-proxy
+    container_name: rag_proxy
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      - CADDY_ADMIN=off
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - backend
+      - frontend
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag_postgres
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-rag}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpass}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./db/migrations:/docker-entrypoint-initdb.d/migrations:ro
+      - ./db/seed:/docker-entrypoint-initdb.d/seed:ro
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.2
+    container_name: rag_qdrant
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    volumes:
+      - qdrant_storage:/qdrant/storage
+      - ./qdrant/qdrant.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  ollama:
+    image: ollama/ollama:0.3.12
+    container_name: rag_ollama
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama_models:/root/.ollama
+      - ./models/ollama:/models/ollama:ro
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "curl -sf http://localhost:11434/api/tags >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    command: ["/bin/sh", "-lc", "ollama serve & sleep 3 && bash /models/ollama/pull.sh && wait"]
+
+  tika:
+    image: apache/tika:2.9.1.0
+    container_name: rag_tika
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9998/tika"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    container_name: rag_backend
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    environment:
+      - ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-rag}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpass}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
+      - JWT_SECRET=${JWT_SECRET:-change_me}
+      - JWT_EXPIRE_MINUTES=1440
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-regulations_chunks}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-BAAI/bge-m3}
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral-7b-instruct-q4}
+      - NO_EXTERNAL_CALLS=1
+      - HF_HOME=/hf_cache
+    volumes:
+      - hf_cache:/hf_cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: rag_frontend
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    environment:
+      - BACKEND_BASE_URL=https://backend.localhost
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_COOKIE_SECRET=${COOKIE_SECRET:-streamlitsecret}
+      - APP_NAME=RAG Assistant Pilot
+    depends_on:
+      - backend
+
+  ingest-worker:
+    build: ./ingest-worker
+    container_name: rag_ingest
+    restart: unless-stopped
+    networks: [rag-pilot-net]
+    environment:
+      - NAS_MOUNT=/mnt/nas/regulations
+      - TIKA_URL=http://tika:9998
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-regulations_chunks}
+      - EMBEDDING_MODEL_NAME=${EMBEDDING_MODEL_NAME:-BAAI/bge-m3}
+      - HF_HOME=/hf_cache
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-604800}
+    volumes:
+      - hf_cache:/hf_cache
+      - ingest_state:/state
+      - /mnt/nas/regulations:/mnt/nas/regulations:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      tika:
+        condition: service_healthy

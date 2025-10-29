@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+
+# Streamlit
+.frontend_state/
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
+**/.pytest_cache/
+hf_cache/
+
